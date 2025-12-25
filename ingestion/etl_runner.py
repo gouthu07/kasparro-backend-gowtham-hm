@@ -3,6 +3,11 @@ from sqlalchemy import text
 from core.database import engine
 from schemas.unified import UnifiedRecord
 from ingestion.csv_source import fetch_csv_data, fetch_csv2_data
+from ingestion.coinpaprika_source import fetch_coinpaprika_data
+from ingestion.coingecko_source import fetch_coingecko_data
+from core.database import SessionLocal
+from models.record import Record
+
 
 
 def get_last_checkpoint(source):
@@ -24,26 +29,26 @@ def update_checkpoint(source, timestamp):
         """), {"s": source, "t": timestamp})
 
 
-def run_etl(api_data, csv_data):
+def run_etl():
     records = []
 
-    api_checkpoint = get_last_checkpoint("api")
-    csv_checkpoint = get_last_checkpoint("csv")
+    # -------- COIN API SOURCES --------
+    coinpaprika_data = fetch_coinpaprika_data()
+    coingecko_data = fetch_coingecko_data()
 
-    # -------- API SOURCE --------
-    for r in api_data:
-        ts = datetime.fromisoformat(r["timestamp"])
-        if api_checkpoint and ts <= api_checkpoint:
-            continue
-
+    for r in coinpaprika_data + coingecko_data:
         records.append(UnifiedRecord(
-            source="api",
-            record_id=str(r["id"]),
-            value=float(r["value"]),
-            timestamp=ts
+            source=r["source"],
+            record_id=r["id"],
+            symbol=r["symbol"],
+            value=float(r["price"]),
+            timestamp=datetime.fromisoformat(r["timestamp"])
         ))
 
     # -------- CSV SOURCE --------
+    csv_checkpoint = get_last_checkpoint("csv")
+    csv_data = fetch_csv_data()
+
     for r in csv_data:
         ts = datetime.fromisoformat(r["timestamp"])
         if csv_checkpoint and ts <= csv_checkpoint:
@@ -56,7 +61,7 @@ def run_etl(api_data, csv_data):
             timestamp=ts
         ))
 
-    # -------- CSV2 SOURCE (THIRD SOURCE) --------
+    # -------- CSV2 SOURCE --------
     csv2_data = fetch_csv2_data()
 
     for r in csv2_data:
@@ -69,12 +74,17 @@ def run_etl(api_data, csv_data):
 
     # -------- UPDATE CHECKPOINTS --------
     if records:
-        api_records = [r.timestamp for r in records if r.source == "api"]
-        csv_records = [r.timestamp for r in records if r.source == "csv"]
+        csv_times = [r.timestamp for r in records if r.source == "csv"]
+        if csv_times:
+            update_checkpoint("csv", max(csv_times))
 
-        if api_records:
-            update_checkpoint("api", max(api_records))
-        if csv_records:
-            update_checkpoint("csv", max(csv_records))
+    if records:
+        db = SessionLocal()
+        try:
+            for r in records:
+                db.add(Record(**r.dict()))
+            db.commit()
+        finally:
+            db.close()
 
     return records
